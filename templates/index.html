@@ -48,7 +48,7 @@ table.param code{font-size:12px}
 <h2>How it works</h2>
 <ol>
 <li>Copy the command below and paste it into your terminal</li>
-<li>Open the URL shown in the response header <code>visit-auth-URL</code></li>
+<li>Open the URL shown in the response header <code>Visit-Auth-URL</code></li>
 <li>Authorize the application to access your account</li>
 </ol>
 <p style="font-size:14px;color:#555;margin-top:12px">The terminal stays connected. Once you authorize in the browser, the token arrives automatically.</p>
@@ -66,7 +66,7 @@ table.param code{font-size:12px}
 
 <div id="cmd-area">
 <div class="cmd-wrap">
-<div class="cmd-line" id="cmd-line">curl -v {{$.ServerURL}}/api/gmail/token &gt; token.json</div>
+<div class="cmd-line" id="cmd-line">curl -sv {{$.ServerURL}}/api/gmail/token &gt; token.json</div>
 <button class="cmd-btn" id="cmd-btn">&#128203; Copy</button>
 </div>
 </div>
@@ -80,7 +80,7 @@ table.param code{font-size:12px}
 <h2>Generic usage</h2>
 <p style="font-size:14px;color:#555;margin-bottom:10px">Replace <code>{service}</code> with the service name:</p>
 <div class="cmd-wrap">
-<div class="cmd-line">curl -v {{.ServerURL}}/api/{service}/token &gt; token.json</div>
+<div class="cmd-line">curl -sv {{.ServerURL}}/api/{service}/token &gt; token.json</div>
 <button class="cmd-btn" data-cmd="curl -v {{.ServerURL}}/api/{service}/token > token.json">&#128203; Copy</button>
 </div>
 
@@ -112,13 +112,11 @@ table.param code{font-size:12px}
 export GOOGLE_CLIENT_ID=...
 export GOOGLE_CLIENT_SECRET=...
 export GOOGLE_REDIRECT_URI=http://localhost:8091/api/google/callback
-export GOOGLE_SCOPES=openid email profile
 
 # Microsoft
 export MICROSOFT_CLIENT_ID=...
 export MICROSOFT_CLIENT_SECRET=...
-export MICROSOFT_REDIRECT_URI=http://localhost:8091/api/microsoft/callback
-export MICROSOFT_SCOPES=openid email profile offline_access</pre>
+export MICROSOFT_REDIRECT_URI=http://localhost:8091/api/microsoft/callback</pre>
 <p style="font-size:14px;color:#666">Or add them to a <code>.env</code> file in the project root.</p>
 </div>
 {{end}}

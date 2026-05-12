@@ -220,8 +220,14 @@ func serverURL(r *http.Request) string {
 	scheme := "http"
 	if r.TLS != nil {
 		scheme = "https"
+	} else if fwd := r.Header.Get("X-Forwarded-Proto"); fwd == "https" {
+		scheme = "https"
 	}
-	return fmt.Sprintf("%s://%s", scheme, r.Host)
+	host := r.Host
+	if h := r.Header.Get("X-Forwarded-Host"); h != "" {
+		host = h
+	}
+	return fmt.Sprintf("%s://%s", scheme, host)
 }
 
 // ---------- Web UI ----------
