@@ -1,0 +1,8 @@
+.git
+.gitignore
+.idea
+*.md
+LICENSE
+docker-compose.yml
+compose.override.sample
+update.sh
