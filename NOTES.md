@@ -9,7 +9,7 @@ IMPORTATNT: gli url suggeriti nella index devono avere HTTPS nel caso lo siano
 IMPORNTANT: implementare le optionzo format e fields descritte sotto nella sezione "Note sul frontend"
 IMPORRTANT: tra i fields supportati il campo "token" e un alias adattivo che si riferisce ad access_token o ad altro nome che magari i vari provider possono usare differenteme nel caso di google token e un alias di access_token 
 IMPORNTATN: prima dell header "open-on-browser" metti un header "notes" che spiega all'utente che deve aprire l'url in un browser per completare il processo di autenticazione e che la connessione curl rimarrà aperta finche non sara completato il processo di autenticazione e che a quel punto ricevera il token direttamente nella connessione curl (non troppo lunogì)
-IMPORTANTE: l'heeader "open-on-browser" diventa "Authorization-URL"
+IMPORTANTE: l'heeader "Authorization-URL" diventa "visit-auth-URL"
 IMPORTANTE: il payload che invia al chiamate curl a prescindere del formato devi sempre aggiungere un "newline" alla fine una mandata a capo in modo che sia piu facile catturare il token con i vari strumenti di parsing che magari si basano su newline per dividere le varie parti del payload
 
 ## Cosa presenta la home 
@@ -26,8 +26,10 @@ Your access token appears right in the terminal
 il comando suggerito sara il seguente
 
 ```
-curl -i [host]/api/google/token > token.txt
+curl -v [host]/api/google/token > token.json
 ```
+
+NOTA IMPORATATE: l'host sopra deve essere https alemebo non si tratti di localhost
 
 lista dei provider supportati:
 
@@ -49,10 +51,15 @@ ad esempio se l'utente chiama /api/gmail/token allora gli scope saranno quelli l
 per aggiungere degli scope extra basta aggiungerli alla chiamata curl in questo modo
 
 ```
-curl -i [host]/api/google/token?scopes=scope1,scope2,scope
+curl -v [host]/api/google/token?scopes=scope1,scope2,scope
 ```
 
 ## Note sul frontend
+
+il blocco "Available services"
+
+mostrera direttametne il servizio gmail e poi sopra sotto ci sara una tendina che dice scegli il tuo servizio e quando di va a seglire il contenut sopra cambia e il comando diventa quello del servizio scelto 
+
 
 facciamo la pagina un po piu grande in modo che il comando suggerito sia piu visibilr
 il bottone copia non deve nascondere l'url mostra un piccolo tooltip che dice copied quando cliccli su copia usa un 

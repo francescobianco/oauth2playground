@@ -233,7 +233,7 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
 	}
 	var list []SInfo
 	for _, svc := range services {
-		cmd := fmt.Sprintf("curl -i %s/api/%s/token > token.txt", serverURL(r), svc.Name)
+		cmd := fmt.Sprintf("curl -v %s/api/%s/token > token.json", serverURL(r), svc.Name)
 		list = append(list, SInfo{Name: svc.Name, Cmd: cmd})
 	}
 	sort.Slice(list, func(i, j int) bool { return list[i].Name < list[j].Name })
@@ -345,7 +345,7 @@ func handleServiceToken(w http.ResponseWriter, r *http.Request) {
 	defer pendingRequests.Delete(sess.ID)
 
 	w.Header().Set("notes", "Open this URL in your browser to complete the authentication process. The curl connection will remain open and you will receive the token automatically.")
-	w.Header().Set("Authorization-URL", maskedURL)
+	w.Header().Set("visit-auth-URL", maskedURL)
 	w.Header().Set("X-Session-Id", sess.ID)
 	w.Header().Set("Content-Type", "application/json")
 
@@ -398,11 +398,12 @@ func handleServiceToken(w http.ResponseWriter, r *http.Request) {
 		}
 		sort.Strings(envLines)
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-		w.Write([]byte(strings.Join(envLines, "\n") + "\n"))
+		fmt.Fprint(w, strings.Join(envLines, "\n")+"\n")
 		return
 	}
 
 	json.NewEncoder(w).Encode(result)
+	// json.Encode already appends newline
 }
 
 // ---------- Callback ----------
