@@ -1,0 +1,15 @@
+networks:
+  proxy:
+    external: true
+
+services:
+  agentgrid:
+    networks:
+      - proxy
+      - default
+    labels:
+      traefik.enable: "true"
+      traefik.http.routers.oauth2playground.rule: "Host(`oauth2playground.alterloop.dev`)"
+      traefik.http.routers.oauth2playground.entrypoints: "websecure"
+      traefik.http.routers.oauth2playground.tls.certresolver: "le"
+      traefik.http.services.oauth2playground.loadbalancer.server.port: "8091"
