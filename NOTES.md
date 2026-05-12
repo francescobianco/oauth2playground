@@ -6,6 +6,11 @@ IMPORTANTE: le varibili CLEINT_ID e CLIENT_SECRET sono nel .env e non sono fonti
 IMPORTANTE: gli scopes delle chiamate saranno legati a profli di servzio a cui chiedere i token
 IMPORTANTE: l'url di autorizzazione che viene inviato all'utente per il process lo devi mascherare con un url temporaneo con un hash random tipo [HOST]/auth/jdo3j383ur238jdj3df8u238dfu che chiaramente essite sono nel corso della chiamato fatta dall'utente 
 IMPORTATNT: gli url suggeriti nella index devono avere HTTPS nel caso lo siano
+IMPORNTANT: implementare le optionzo format e fields descritte sotto nella sezione "Note sul frontend"
+IMPORRTANT: tra i fields supportati il campo "token" e un alias adattivo che si riferisce ad access_token o ad altro nome che magari i vari provider possono usare differenteme nel caso di google token e un alias di access_token 
+IMPORNTATN: prima dell header "open-on-browser" metti un header "notes" che spiega all'utente che deve aprire l'url in un browser per completare il processo di autenticazione e che la connessione curl rimarrà aperta finche non sara completato il processo di autenticazione e che a quel punto ricevera il token direttamente nella connessione curl (non troppo lunogì)
+IMPORTANTE: l'heeader "open-on-browser" diventa "Authorization-URL"
+IMPORTANTE: il payload che invia al chiamate curl a prescindere del formato devi sempre aggiungere un "newline" alla fine una mandata a capo in modo che sia piu facile catturare il token con i vari strumenti di parsing che magari si basano su newline per dividere le varie parti del payload
 
 ## Cosa presenta la home 
 
@@ -46,3 +51,23 @@ per aggiungere degli scope extra basta aggiungerli alla chiamata curl in questo 
 ```
 curl -i [host]/api/google/token?scopes=scope1,scope2,scope
 ```
+
+## Note sul frontend
+
+facciamo la pagina un po piu grande in modo che il comando suggerito sia piu visibilr
+il bottone copia non deve nascondere l'url mostra un piccolo tooltip che dice copied quando cliccli su copia usa un 
+usa un bottoncino di copia piu grazioso 
+
+mostra sotto l'elende dei provader suggeriti 
+
+sotto metti la guiada genereica che mostra la chianat GET con il plackernoer nel nome del provider 
+
+e tutti questi argome ti che possono essere passati 
+
+scopes: listan degli scope
+ 
+format: json o env ; fai una tabellina che spiega i vari formati nel caso di env si tratta di una forma che e tipico per esser appeso in .env file  
+
+fields: la lista dei campi ad esempio se si vuole solo il access_token 
+
+

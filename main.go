@@ -140,8 +140,8 @@ type PendingRequest struct {
 }
 
 type ServiceDef struct {
-	Name     string // "google", "gmail", "gdrive", "microsoft"
-	Provider string // "google" or "microsoft"
+	Name     string
+	Provider string
 	Scopes   string
 }
 
@@ -228,15 +228,13 @@ func serverURL(r *http.Request) string {
 
 func handleIndex(w http.ResponseWriter, r *http.Request) {
 	type SInfo struct {
-		Name    string
-		Cmd     string
-		CmdLong string
+		Name string
+		Cmd  string
 	}
 	var list []SInfo
 	for _, svc := range services {
 		cmd := fmt.Sprintf("curl -i %s/api/%s/token > token.txt", serverURL(r), svc.Name)
-		cmdLong := fmt.Sprintf("curl -i '%s/api/%s/token?scopes=extra1,extra2' > token.txt", serverURL(r), svc.Name)
-		list = append(list, SInfo{Name: svc.Name, Cmd: cmd, CmdLong: cmdLong})
+		list = append(list, SInfo{Name: svc.Name, Cmd: cmd})
 	}
 	sort.Slice(list, func(i, j int) bool { return list[i].Name < list[j].Name })
 
@@ -317,6 +315,9 @@ func handleServiceToken(w http.ResponseWriter, r *http.Request) {
 		scopes = svc.Scopes + " " + strings.ReplaceAll(extraScopes, ",", " ")
 	}
 
+	format := r.URL.Query().Get("format")
+	fields := r.URL.Query().Get("fields")
+
 	authURLStr := providerAuthURLs[svc.Provider]
 	tokenURLStr := providerTokenURLs[svc.Provider]
 
@@ -333,7 +334,7 @@ func handleServiceToken(w http.ResponseWriter, r *http.Request) {
 	}
 	store.Create(sess)
 
-	maskedURL := fmt.Sprintf("http://%s/auth/%s", r.Host, sess.AuthHash)
+	maskedURL := fmt.Sprintf("%s/auth/%s", serverURL(r), sess.AuthHash)
 	store.Update(sess.ID, func(s *Session) { s.Status = "masked" })
 
 	pr := &PendingRequest{
@@ -343,7 +344,8 @@ func handleServiceToken(w http.ResponseWriter, r *http.Request) {
 	pendingRequests.Store(sess.ID, pr)
 	defer pendingRequests.Delete(sess.ID)
 
-	w.Header().Set("open-on-browser", maskedURL)
+	w.Header().Set("notes", "Open this URL in your browser to complete the authentication process. The curl connection will remain open and you will receive the token automatically.")
+	w.Header().Set("Authorization-URL", maskedURL)
 	w.Header().Set("X-Session-Id", sess.ID)
 	w.Header().Set("Content-Type", "application/json")
 
@@ -352,22 +354,60 @@ func handleServiceToken(w http.ResponseWriter, r *http.Request) {
 		f.Flush()
 	}
 
+	var result map[string]interface{}
+	var resultErr string
+
 	select {
 	case token := <-pr.TokenChan:
-		json.NewEncoder(w).Encode(token)
+		result = token
 	case err := <-pr.ErrorChan:
-		json.NewEncoder(w).Encode(map[string]string{"error": err})
+		resultErr = err
 	case <-time.After(5 * time.Minute):
-		json.NewEncoder(w).Encode(map[string]string{"error": "timeout"})
+		resultErr = "timeout"
 	case <-r.Context().Done():
+		return
 	}
+
+	if resultErr != "" {
+		json.NewEncoder(w).Encode(map[string]string{"error": resultErr})
+		return
+	}
+
+	// Apply fields filter
+	if fields != "" {
+		fieldList := strings.Split(fields, ",")
+		filtered := make(map[string]interface{})
+		for _, f := range fieldList {
+			f = strings.TrimSpace(f)
+			srcField := f
+			if f == "token" {
+				srcField = "access_token"
+			}
+			if v, ok := result[srcField]; ok {
+				filtered[f] = v
+			}
+		}
+		result = filtered
+	}
+
+	// Apply format
+	if format == "env" {
+		var envLines []string
+		for k, v := range result {
+			envLines = append(envLines, fmt.Sprintf("%s=%v", strings.ToUpper(k), v))
+		}
+		sort.Strings(envLines)
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.Write([]byte(strings.Join(envLines, "\n") + "\n"))
+		return
+	}
+
+	json.NewEncoder(w).Encode(result)
 }
 
 // ---------- Callback ----------
 
 func handleCallback(w http.ResponseWriter, r *http.Request) {
-	provider := r.PathValue("provider")
-
 	code := r.URL.Query().Get("code")
 	state := r.URL.Query().Get("state")
 	errStr := r.URL.Query().Get("error")
@@ -386,11 +426,6 @@ func handleCallback(w http.ResponseWriter, r *http.Request) {
 	sess, ok := store.FindByState(state)
 	if !ok {
 		renderCallbackHTML(w, "Session not found", "The state parameter did not match any active session")
-		return
-	}
-
-	if sess.Provider != provider {
-		renderCallbackHTML(w, "Provider mismatch", fmt.Sprintf("session provider is %q, not %q", sess.Provider, provider))
 		return
 	}
 
