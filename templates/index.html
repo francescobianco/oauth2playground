@@ -119,7 +119,7 @@ export MICROSOFT_REDIRECT_URI=http://localhost:8091/api/microsoft/callback</pre>
 <script>
 var services = [
 {{range .Services}}
-{name:"{{.Name}}",cmd:"curl -v {{$.ServerURL}}/api/{{.Name}}/token > token.json"},
+{name:"{{.Name}}",cmd:"curl -sv {{$.ServerURL}}/api/{{.Name}}/token > token.json"},
 {{end}}
 ];
 

@@ -26,7 +26,7 @@ Your access token appears right in the terminal
 il comando suggerito sara il seguente
 
 ```
-curl -v [host]/api/google/token > token.json
+curl -sv [host]/api/google/token > token.json
 ```
 
 NOTA IMPORATATE: l'host sopra deve essere https alemebo non si tratti di localhost
@@ -51,7 +51,7 @@ ad esempio se l'utente chiama /api/gmail/token allora gli scope saranno quelli l
 per aggiungere degli scope extra basta aggiungerli alla chiamata curl in questo modo
 
 ```
-curl -v [host]/api/google/token?scopes=scope1,scope2,scope
+curl -sv [host]/api/google/token?scopes=scope1,scope2,scope
 ```
 
 ## Note sul frontend
