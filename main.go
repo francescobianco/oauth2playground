@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -28,7 +29,7 @@ type Session struct {
 	Name         string    `json:"name"`
 	AuthURL      string    `json:"auth_url"`
 	TokenURL     string    `json:"token_url"`
-	ClientID     string    `json:"client_id"`
+	ClientID     string    `json:"-"`
 	ClientSecret string    `json:"-"`
 	Scopes       string    `json:"scopes"`
 	RedirectURI  string    `json:"redirect_uri"`
@@ -113,18 +114,54 @@ type PendingRequest struct {
 	ErrorChan chan string
 }
 
+type ProviderConfig struct {
+	Name        string
+	AuthURL     string
+	TokenURL    string
+	ClientID    string
+	ClientSecret string
+	RedirectURI string
+	Scopes      string
+}
+
 var (
 	store           = NewStore()
 	tmpls           = template.Must(template.ParseFS(templateFS, "templates/*.html"))
 	pendingRequests sync.Map
-
-	googleClientID     = os.Getenv("OAUTH2PLAYGROUND_GOOGLE_CLIENT_ID")
-	googleClientSecret = os.Getenv("OAUTH2PLAYGROUND_GOOGLE_CLIENT_SECRET")
-	googleRedirectURI  = envOrDefault("OAUTH2PLAYGROUND_GOOGLE_REDIRECT_URI", "http://localhost:8080")
-	googleScopes       = envOrDefault("OAUTH2PLAYGROUND_GOOGLE_SCOPES", "openid email profile")
+	providers       map[string]*ProviderConfig
 )
 
-func envOrDefault(key, def string) string {
+func loadProviders() map[string]*ProviderConfig {
+	m := make(map[string]*ProviderConfig)
+
+	if id := os.Getenv("GOOGLE_CLIENT_ID"); id != "" {
+		m["google"] = &ProviderConfig{
+			Name:         "google",
+			AuthURL:      "https://accounts.google.com/o/oauth2/v2/auth",
+			TokenURL:     "https://oauth2.googleapis.com/token",
+			ClientID:     id,
+			ClientSecret: os.Getenv("GOOGLE_CLIENT_SECRET"),
+			RedirectURI:  envOr("GOOGLE_REDIRECT_URI", "http://localhost:8091/api/google/callback"),
+			Scopes:       envOr("GOOGLE_SCOPES", "openid email profile"),
+		}
+	}
+
+	if id := os.Getenv("MICROSOFT_CLIENT_ID"); id != "" {
+		m["microsoft"] = &ProviderConfig{
+			Name:         "microsoft",
+			AuthURL:      "https://login.microsoftonline.com/common/oauth2/v2.0/authorize",
+			TokenURL:     "https://login.microsoftonline.com/common/oauth2/v2.0/token",
+			ClientID:     id,
+			ClientSecret: os.Getenv("MICROSOFT_CLIENT_SECRET"),
+			RedirectURI:  envOr("MICROSOFT_REDIRECT_URI", "http://localhost:8091/api/microsoft/callback"),
+			Scopes:       envOr("MICROSOFT_SCOPES", "openid email profile offline_access"),
+		}
+	}
+
+	return m
+}
+
+func envOr(key, def string) string {
 	if v := os.Getenv(key); v != "" {
 		return v
 	}
@@ -132,24 +169,29 @@ func envOrDefault(key, def string) string {
 }
 
 func main() {
+	providers = loadProviders()
+
 	mux := http.NewServeMux()
-
 	mux.HandleFunc("GET /", handleIndex)
-	mux.HandleFunc("GET /start", handleStartScript)
-
-	mux.HandleFunc("GET /api/google/token", handleGoogleToken)
-	mux.HandleFunc("POST /api/google/callback", handleGoogleCallback)
-
-	mux.HandleFunc("POST /api/session", handleCreateSession)
-	mux.HandleFunc("POST /api/session/{id}/auth-url", handleAuthURL)
-	mux.HandleFunc("POST /api/session/{id}/exchange", handleExchange)
+	mux.HandleFunc("GET /api/{provider}/token", handleProviderToken)
+	mux.HandleFunc("GET /api/{provider}/callback", handleProviderCallback)
 
 	addr := ":8091"
 	log.Printf("OAuth2 Playground v%s on %s", version, addr)
-	if googleClientID != "" {
-		log.Printf("Google provider configured: client_id=%s redirect_uri=%s", googleClientID[:8]+"...", googleRedirectURI)
+	for name, p := range providers {
+		log.Printf("  provider %s: client_id=%s redirect=%s", name, shorten(p.ClientID, 12), p.RedirectURI)
+	}
+	if len(providers) == 0 {
+		log.Printf("  no providers configured — set GOOGLE_CLIENT_ID or MICROSOFT_CLIENT_ID env vars")
 	}
 	log.Fatal(http.ListenAndServe(addr, mux))
+}
+
+func shorten(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "..."
 }
 
 func serverURL(r *http.Request) string {
@@ -163,50 +205,54 @@ func serverURL(r *http.Request) string {
 // ---------- Web UI ----------
 
 func handleIndex(w http.ResponseWriter, r *http.Request) {
-	googleReady := googleClientID != "" && googleClientSecret != ""
+	type PInfo struct {
+		Name string
+		Cmd  string
+	}
+	var list []PInfo
+	for name := range providers {
+		list = append(list, PInfo{
+			Name: name,
+			Cmd:  fmt.Sprintf("curl -i %s/api/%s/token > token.txt", serverURL(r), name),
+		})
+	}
+	sort.Slice(list, func(i, j int) bool { return list[i].Name < list[j].Name })
+
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	tmpls.ExecuteTemplate(w, "index.html", map[string]interface{}{
-		"ServerURL":      serverURL(r),
-		"Version":        version,
-		"GoogleReady":    googleReady,
-		"GoogleRedirect": googleRedirectURI,
+		"ServerURL": serverURL(r),
+		"Version":   version,
+		"Providers": list,
 	})
 }
 
-// ---------- Start script ----------
+// ---------- Token (long-poll) ----------
 
-func handleStartScript(w http.ResponseWriter, r *http.Request) {
-	su := serverURL(r)
-	w.Header().Set("Content-Type", "text/x-shellscript; charset=utf-8")
-	w.Write([]byte(generateStartScript(su)))
-}
-
-// ---------- Google token (long-poll) ----------
-
-func handleGoogleToken(w http.ResponseWriter, r *http.Request) {
-	if googleClientID == "" || googleClientSecret == "" {
-		writeJSON(w, 400, map[string]string{
-			"error":   "google provider not configured",
-			"message": "Set OAUTH2PLAYGROUND_GOOGLE_CLIENT_ID and OAUTH2PLAYGROUND_GOOGLE_CLIENT_SECRET",
-		})
+func handleProviderToken(w http.ResponseWriter, r *http.Request) {
+	provider := r.PathValue("provider")
+	cfg, ok := providers[provider]
+	if !ok {
+		writeJSON(w, 404, map[string]string{"error": fmt.Sprintf("provider %q not configured", provider)})
 		return
 	}
 
+	redirectURI := cfg.RedirectURI
+
 	sess := &Session{
-		Name:         "google",
-		AuthURL:      "https://accounts.google.com/o/oauth2/v2/auth",
-		TokenURL:     "https://oauth2.googleapis.com/token",
-		ClientID:     googleClientID,
-		ClientSecret: googleClientSecret,
-		Scopes:       googleScopes,
-		RedirectURI:  googleRedirectURI,
+		Name:         provider,
+		AuthURL:      cfg.AuthURL,
+		TokenURL:     cfg.TokenURL,
+		ClientID:     cfg.ClientID,
+		ClientSecret: cfg.ClientSecret,
+		Scopes:       cfg.Scopes,
+		RedirectURI:  redirectURI,
 	}
 	store.Create(sess)
 
 	v := url.Values{}
 	v.Set("response_type", "code")
 	v.Set("client_id", sess.ClientID)
-	v.Set("redirect_uri", sess.RedirectURI)
+	v.Set("redirect_uri", redirectURI)
 	v.Set("state", sess.State)
 	v.Set("access_type", "offline")
 	v.Set("prompt", "consent")
@@ -233,11 +279,9 @@ func handleGoogleToken(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("X-Session-Id", sess.ID)
 	w.Header().Set("Content-Type", "application/json")
 
-	flusher, canFlush := w.(http.Flusher)
-	if canFlush {
+	if f, ok := w.(http.Flusher); ok {
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte{})
-		flusher.Flush()
+		f.Flush()
 	}
 
 	select {
@@ -246,36 +290,39 @@ func handleGoogleToken(w http.ResponseWriter, r *http.Request) {
 	case err := <-pr.ErrorChan:
 		json.NewEncoder(w).Encode(map[string]string{"error": err})
 	case <-time.After(5 * time.Minute):
-		json.NewEncoder(w).Encode(map[string]string{"error": "timeout", "message": "no callback received within 5 minutes"})
+		json.NewEncoder(w).Encode(map[string]string{"error": "timeout"})
 	case <-r.Context().Done():
-		log.Printf("google token request cancelled for session %s", sess.ID)
 	}
 }
 
-// ---------- Google callback ----------
+// ---------- Callback (riceve il redirect dal provider) ----------
 
-func handleGoogleCallback(w http.ResponseWriter, r *http.Request) {
-	if err := r.ParseForm(); err != nil {
-		writeJSON(w, 400, map[string]string{"error": err.Error()})
+func handleProviderCallback(w http.ResponseWriter, r *http.Request) {
+	provider := r.PathValue("provider")
+
+	code := r.URL.Query().Get("code")
+	state := r.URL.Query().Get("state")
+	errStr := r.URL.Query().Get("error")
+
+	if errStr != "" {
+		desc := r.URL.Query().Get("error_description")
+		renderCallbackHTML(w, fmt.Sprintf("Error: %s", errStr), desc)
 		return
 	}
 
-	code := r.FormValue("code")
-	state := r.FormValue("state")
-
 	if code == "" || state == "" {
-		writeJSON(w, 400, map[string]string{"error": "missing code or state"})
+		renderCallbackHTML(w, "Missing parameters", "code and state are required")
 		return
 	}
 
 	sess, ok := store.FindByState(state)
 	if !ok {
-		writeJSON(w, 404, map[string]string{"error": "session not found for given state"})
+		renderCallbackHTML(w, "Session not found", "The state parameter did not match any active session")
 		return
 	}
 
-	if sess.Name != "google" {
-		writeJSON(w, 400, map[string]string{"error": fmt.Sprintf("session provider is %q, not google", sess.Name)})
+	if sess.Name != provider {
+		renderCallbackHTML(w, "Provider mismatch", fmt.Sprintf("session is for %q, not %q", sess.Name, provider))
 		return
 	}
 
@@ -286,7 +333,7 @@ func handleGoogleCallback(w http.ResponseWriter, r *http.Request) {
 		if result.Status == 200 {
 			pr.TokenChan <- result.Data
 		} else {
-			errMsg := "exchange failed"
+			errMsg := "token exchange failed"
 			if e, ok := result.Data["error_description"]; ok {
 				errMsg = e.(string)
 			} else if e, ok := result.Data["error"]; ok {
@@ -296,10 +343,16 @@ func handleGoogleCallback(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	writeJSON(w, 200, map[string]string{"status": "ok", "message": "token sent to pending request"})
+	renderCallbackHTML(w, "Authorization complete!", "You can close this window and check your terminal for the token.")
 }
 
-// ---------- Session API ----------
+func renderCallbackHTML(w http.ResponseWriter, title, msg string) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	fmt.Fprintf(w, `<!DOCTYPE html><html><body style="font-family:sans-serif;text-align:center;padding:80px 20px">
+<h1>%s</h1><p>%s</p><script>window.close()</script></body></html>`, title, msg)
+}
+
+// ---------- Session API generica ----------
 
 func handleCreateSession(w http.ResponseWriter, r *http.Request) {
 	if err := r.ParseForm(); err != nil {
@@ -438,174 +491,4 @@ func exchangeCode(sess *Session, code string) exchangeResult {
 	}
 
 	return exchangeResult{200, data}
-}
-
-// ---------- Start script generation ----------
-
-func generateStartScript(serverURL string) string {
-	googleHint := ""
-	if googleClientID != "" && googleClientSecret != "" {
-		googleHint = fmt.Sprintf(`echo ""
-echo "  Quick start with Google:"
-echo "    curl -v %s/api/google/token"
-echo "    (then in another terminal after netcat captures the code:)"
-echo "    curl -X POST %s/api/google/callback -d \"code=CODE_FROM_NETCAT&state=STATE_FROM_NETCAT\""
-echo ""`, serverURL, serverURL)
-	}
-
-	s := `#!/bin/bash
-# OAuth2 Playground v{{VERSION}} - Interactive flow
-# Usage: curl -s {{SERVER}}/start | bash
-set -e
-
-SERVER="{{SERVER}}"
-
-echo ""
-echo "  >> OAuth2 Playground v{{VERSION}} <<"
-echo "  Interactive access token retriever"
-echo ""
-GOOGLE_HINT
-
-# ---------- config ----------
-read -p "  Provider name        [default]: " PROVIDER
-PROVIDER=${PROVIDER:-default}
-
-read -p "  Authorization URL    [https://accounts.google.com/o/oauth2/v2/auth]: " AUTH_URL
-AUTH_URL=${AUTH_URL:-https://accounts.google.com/o/oauth2/v2/auth}
-
-read -p "  Token URL            [https://oauth2.googleapis.com/token]: " TOKEN_URL
-TOKEN_URL=${TOKEN_URL:-https://oauth2.googleapis.com/token}
-
-read -p "  Client ID            : " CLIENT_ID
-while [ -z "$CLIENT_ID" ]; do
-  read -p "  Client ID (required) : " CLIENT_ID
-done
-
-read -s -p "  Client Secret        : " CLIENT_SECRET
-echo ""
-while [ -z "$CLIENT_SECRET" ]; do
-  read -s -p "  Client Secret (req)  : " CLIENT_SECRET
-  echo ""
-done
-
-read -p "  Scopes               [openid email profile]: " SCOPES
-SCOPES=${SCOPES:-openid email profile}
-
-read -p "  Redirect URI         [http://localhost:8080]: " REDIRECT_URI
-REDIRECT_URI=${REDIRECT_URI:-http://localhost:8080}
-
-# ---------- create session ----------
-echo ""
-echo "  Creating session ..."
-
-RESP=$(curl -s -X POST "$SERVER/api/session" \
-  -d "name=$PROVIDER" \
-  -d "auth_url=$AUTH_URL" \
-  -d "token_url=$TOKEN_URL" \
-  -d "client_id=$CLIENT_ID" \
-  -d "client_secret=$CLIENT_SECRET" \
-  -d "scopes=$SCOPES" \
-  -d "redirect_uri=$REDIRECT_URI")
-
-SESSION_ID=$(echo "$RESP" | python3 -c "import sys,json; print(json.load(sys.stdin).get('id',''))" 2>/dev/null || echo "$RESP" | grep -o '"id":"[^"]*"' | cut -d'"' -f4)
-
-if [ -z "$SESSION_ID" ]; then
-  echo "  ERROR: $RESP"
-  exit 1
-fi
-
-echo "  Session: $SESSION_ID"
-
-# ---------- get auth url ----------
-echo "  Preparing authorization request ..."
-
-AUTH_RESP=$(curl -s -X POST "$SERVER/api/session/$SESSION_ID/auth-url")
-AUTH_URL=$(echo "$AUTH_RESP" | python3 -c "import sys,json; print(json.load(sys.stdin).get('auth_url',''))" 2>/dev/null || echo "$AUTH_RESP" | grep -o '"auth_url":"[^"]*"' | cut -d'"' -f4)
-
-if [ -z "$AUTH_URL" ]; then
-  echo "  ERROR: $AUTH_RESP"
-  exit 1
-fi
-
-echo "  Opening browser ..."
-
-if command -v xdg-open &>/dev/null; then
-  xdg-open "$AUTH_URL" 2>/dev/null || true
-elif command -v open &>/dev/null; then
-  open "$AUTH_URL" 2>/dev/null || true
-else
-  echo ""
-  echo "  Open this URL in your browser:"
-  echo "  $AUTH_URL"
-fi
-
-# ---------- listen ----------
-PORT=$(echo "$REDIRECT_URI" | sed 's/.*:\([0-9]*\).*/\1/')
-[ -z "$PORT" ] && PORT=8080
-
-echo "  Listening on port $PORT ..."
-
-RESP_HTTP=$(printf "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n<!DOCTYPE html><html><body><h1>OK</h1><script>window.close()</script></body></html>")
-
-REQUEST=""
-if command -v nc &>/dev/null; then
-  REQUEST=$(printf "%s" "$RESP_HTTP" | nc -l "$PORT" 2>/dev/null || true)
-  if [ -z "$REQUEST" ]; then
-    REQUEST=$(printf "%s" "$RESP_HTTP" | nc -l -p "$PORT" 2>/dev/null || true)
-  fi
-fi
-
-if [ -z "$REQUEST" ]; then
-  echo "  ERROR: no callback received on port $PORT"
-  echo "  Make sure netcat (nc) is installed"
-  exit 1
-fi
-
-echo "  Callback received!"
-
-# ---------- extract code ----------
-FIRST=$(echo "$REQUEST" | head -1)
-
-ERR=$(echo "$FIRST" | sed 's/.*[?&]error=\([^& ]*\).*/\1/')
-if [ "$ERR" != "$FIRST" ]; then
-  DESC=$(echo "$FIRST" | sed 's/.*[?&]error_description=\([^& ]*\).*/\1/')
-  echo "  ERROR from provider: $ERR"
-  [ -n "$DESC" ] && echo "  Description: $(echo "$DESC" | sed 's/+/ /g')"
-  exit 1
-fi
-
-CODE=$(echo "$FIRST" | sed 's/.*[?&]code=\([^& ]*\).*/\1/')
-STATE=$(echo "$FIRST" | sed 's/.*[?&]state=\([^& ]*\).*/\1/')
-
-if [ -z "$CODE" ] || [ "$CODE" = "$FIRST" ]; then
-  echo "  ERROR: could not find authorization code in callback"
-  echo "  Raw: $FIRST"
-  exit 1
-fi
-
-echo "  Authorization code extracted"
-echo ""
-
-# ---------- exchange ----------
-echo "  Exchanging code for access token ..."
-
-RESULT=$(curl -s -X POST "$SERVER/api/session/$SESSION_ID/exchange" -d "code=$CODE")
-
-echo ""
-echo "  ========================"
-echo "    ACCESS TOKEN"
-echo "  ========================"
-if command -v python3 &>/dev/null; then
-  echo "$RESULT" | python3 -m json.tool 2>/dev/null || echo "$RESULT"
-else
-  echo "$RESULT"
-fi
-echo "  ========================"
-echo ""
-`
-
-	s = strings.ReplaceAll(s, "{{VERSION}}", version)
-	s = strings.ReplaceAll(s, "{{SERVER}}", serverURL)
-	s = strings.ReplaceAll(s, "GOOGLE_HINT", googleHint)
-	return s
 }

@@ -12,69 +12,65 @@ h1{font-size:28px;margin-bottom:4px}
 .sub{color:#666;font-size:14px;margin-bottom:24px}
 .card{background:#fff;border-radius:12px;padding:28px;box-shadow:0 1px 3px rgba(0,0,0,.1);margin-bottom:16px}
 .card h2{font-size:18px;margin-bottom:12px}
-p{font-size:14px;line-height:1.6;color:#444;margin-bottom:10px}
-code{background:#eef1f5;padding:2px 6px;border-radius:4px;font-size:13px}
-pre{background:#1e1e2e;color:#cdd6f4;padding:14px 18px;border-radius:8px;font-family:'SF Mono','Fira Code',monospace;font-size:14px;overflow-x:auto;margin:12px 0}
-.cmd{background:#1e1e2e;color:#cdd6f4;padding:14px 18px;border-radius:8px;font-family:'SF Mono','Fira Code',monospace;font-size:14px;cursor:pointer;position:relative;margin:12px 0}
+.cmd{background:#1e1e2e;color:#cdd6f4;padding:14px 18px;border-radius:8px;font-family:'SF Mono','Fira Code',monospace;font-size:14px;cursor:pointer;position:relative;margin:8px 0}
 .cmd:hover{background:#2a2a3e}
 .cmd .hint{position:absolute;right:12px;top:50%;transform:translateY(-50%);font-size:11px;color:#888;pointer-events:none}
-ol{font-size:14px;color:#444;padding-left:20px;line-height:1.8}
-ol li{margin-bottom:4px}
+ol{font-size:14px;color:#444;padding-left:20px;line-height:1.9}
+ol li{margin-bottom:2px}
+code{background:#eef1f5;padding:2px 6px;border-radius:4px;font-size:13px}
 .tag{display:inline-block;background:#4a6cf7;color:#fff;padding:1px 8px;border-radius:4px;font-size:11px;font-weight:600;vertical-align:middle}
+.pill{display:inline-block;background:#e8f0fe;color:#1a73e8;padding:0 10px;border-radius:12px;font-size:12px;font-weight:600;line-height:22px}
 </style>
 </head>
 <body>
 <div class="wrap">
 <h1>&#9670; OAuth2 Playground <span class="tag">v{{.Version}}</span></h1>
-<p class="sub">Get OAuth2 access tokens from your terminal &mdash; no web UI needed</p>
+<p class="sub">Get OAuth2 access tokens from your terminal</p>
 
 <div class="card">
 <h2>How it works</h2>
 <ol>
 <li>Copy the command below and paste it into your terminal</li>
-<li>Enter your OAuth2 credentials (client_id, secret, endpoints)</li>
-<li>Your browser opens &mdash; log in and authorize the app</li>
-<li>The terminal captures the redirect via netcat and exchanges the code</li>
-<li>Your access token appears right in the terminal</li>
+<li>Open the URL shown in the response header <code>open-on-browser</code></li>
+<li>Authorize the application to access your account</li>
 </ol>
+<p style="font-size:14px;color:#555;margin-top:12px">The terminal stays connected. Once you authorize in the browser, the token arrives automatically.</p>
 </div>
 
+{{if .Providers}}
 <div class="card">
-<h2>One-liner (interactive)</h2>
-<p>Copy and run this in your terminal:</p>
-<div class="cmd" id="cmdline" data-cmd="curl -s {{.ServerURL}}/start | bash">curl -s {{.ServerURL}}/start | bash<span class="hint">click to copy</span></div>
-<p>Requires <code>curl</code>, <code>nc</code> (netcat), and <code>python3</code> on your machine.</p>
+<h2>Available providers</h2>
+{{range .Providers}}
+<div style="margin-bottom:16px">
+<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
+<span class="pill">{{.Name}}</span>
 </div>
-
-{{if .GoogleReady}}
-<div class="card" style="border-left:4px solid #34a853">
-<h2>&#9654; Google quick start</h2>
-<p style="font-size:13px;color:#666;margin-bottom:8px">Google OAuth2 is pre-configured. Use two terminals:</p>
-<p><strong>Terminal 1</strong> &mdash; start the request (connection stays open):</p>
-<div class="cmd" id="cmdgoogle" data-cmd="curl -v {{.ServerURL}}/api/google/token">curl -v {{.ServerURL}}/api/google/token<span class="hint">click to copy</span></div>
-
-<p><strong>Terminal 2</strong> &mdash; listen for the callback and send the code back:</p>
-<div class="cmd" id="cmdnc" data-cmd="RESP=$(printf 'HTTP/1.1 200 OK\r\n\r\nOK' | nc -l 8080) \&\& CODE=$(echo &quot;$RESP&quot; | head -1 | sed 's/.*code=\([^& ]*\).*/\1/') \&\& STATE=$(echo &quot;$RESP&quot; | head -1 | sed 's/.*state=\([^& ]*\).*/\1/') \&\& curl -X POST {{.ServerURL}}/api/google/callback -d &quot;code=$CODE&amp;state=$STATE&quot;">RESP=$(printf 'HTTP/1.1 200 OK\r\n\r\nOK' | nc -l 8080) && CODE=$(echo "$RESP" | head -1 | sed 's/.*code=\([^& ]*\).*/\1/') && STATE=$(echo "$RESP" | head -1 | sed 's/.*state=\([^& ]*\).*/\1/') && curl -X POST {{.ServerURL}}/api/google/callback -d "code=$CODE&amp;state=$STATE"<span class="hint">click to copy</span></div>
-
-<p style="font-size:13px;color:#888">After authorizing in the browser, the redirect goes to netcat. The code is then sent back and Terminal 1 receives the token.</p>
+<div class="cmd" data-cmd="{{.Cmd}}">{{.Cmd}}<span class="hint">click to copy</span></div>
+</div>
+{{end}}
 </div>
 {{else}}
 <div class="card" style="border-left:4px solid #ea4335">
-<h2>Google one-step</h2>
-<p style="font-size:13px;color:#888">Set environment variables to enable the Google quick-start endpoint:</p>
-<pre>export OAUTH2PLAYGROUND_GOOGLE_CLIENT_ID=your_client_id
-export OAUTH2PLAYGROUND_GOOGLE_CLIENT_SECRET=your_client_secret
-export OAUTH2PLAYGROUND_GOOGLE_REDIRECT_URI=http://localhost:8080
-export OAUTH2PLAYGROUND_GOOGLE_SCOPES="openid email profile"</pre>
-<p style="font-size:13px;color:#888">Then restart the server.</p>
+<h2>No providers configured</h2>
+<p style="font-size:14px;color:#666">Set the following environment variables and restart the server:</p>
+<pre style="background:#1e1e2e;color:#cdd6f4;padding:12px;border-radius:6px;margin:12px 0;font-size:13px;overflow-x:auto"># Google
+export GOOGLE_CLIENT_ID=...
+export GOOGLE_CLIENT_SECRET=...
+export GOOGLE_REDIRECT_URI=http://localhost:8091/api/google/callback
+
+# Microsoft
+export MICROSOFT_CLIENT_ID=...
+export MICROSOFT_CLIENT_SECRET=...
+export MICROSOFT_REDIRECT_URI=http://localhost:8091/api/microsoft/callback</pre>
+<p style="font-size:14px;color:#666">Or add them to a <code>.env</code> file in the project root.</p>
 </div>
 {{end}}
 </div>
 
 <script>
 (function(){
-var el=document.getElementById('cmdline');
-if(!el)return;
+var els=document.querySelectorAll('.cmd');
+els.forEach(function(el){
 el.addEventListener('click',function(){
 var cmd=this.getAttribute('data-cmd');
 navigator.clipboard.writeText(cmd);
@@ -82,6 +78,7 @@ var orig=this.innerHTML;
 this.innerHTML='&#10003; Copied!';
 var self=this;
 setTimeout(function(){self.innerHTML=orig;},2000);
+});
 });
 })();
 </script>
