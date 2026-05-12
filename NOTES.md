@@ -4,6 +4,8 @@ IMPORTANTE: toglie dalle variabili di ambiente il prefisso OAUTH2PLAYGROUND_
 IMPORTANTE: abbiamo deciso che il redirect in locale non lo fara piu il tocker viene catturare dentro l'installziaone del progetto e poi conseganto localmetne attraveso la connessio curl rimasta appesa
 IMPORTANTE: le varibili CLEINT_ID e CLIENT_SECRET sono nel .env e non sono fontire dai nostri utenti ma sono gia presenti nel progetto e non devono essere modificate dagli utenti
 IMPORTANTE: gli scopes delle chiamate saranno legati a profli di servzio a cui chiedere i token
+IMPORTANTE: l'url di autorizzazione che viene inviato all'utente per il process lo devi mascherare con un url temporaneo con un hash random tipo [HOST]/auth/jdo3j383ur238jdj3df8u238dfu che chiaramente essite sono nel corso della chiamato fatta dall'utente 
+IMPORTATNT: gli url suggeriti nella index devono avere HTTPS nel caso lo siano
 
 ## Cosa presenta la home 
 

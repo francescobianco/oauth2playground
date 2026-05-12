@@ -27,13 +27,15 @@ type Session struct {
 	ID           string    `json:"id"`
 	CreatedAt    time.Time `json:"created_at"`
 	Name         string    `json:"name"`
-	AuthURL      string    `json:"auth_url"`
-	TokenURL     string    `json:"token_url"`
+	Provider     string    `json:"provider"`
+	AuthURL      string    `json:"-"`
+	TokenURL     string    `json:"-"`
 	ClientID     string    `json:"-"`
 	ClientSecret string    `json:"-"`
 	Scopes       string    `json:"scopes"`
 	RedirectURI  string    `json:"redirect_uri"`
 	State        string    `json:"state"`
+	AuthHash     string    `json:"-"`
 	Status       string    `json:"status"`
 	AccessToken  string    `json:"access_token,omitempty"`
 	TokenType    string    `json:"token_type,omitempty"`
@@ -43,15 +45,17 @@ type Session struct {
 }
 
 type Store struct {
-	mu       sync.RWMutex
-	sessions map[string]*Session
-	byState  map[string]string
+	mu         sync.RWMutex
+	sessions   map[string]*Session
+	byState    map[string]string
+	byAuthHash map[string]string
 }
 
 func NewStore() *Store {
 	return &Store{
-		sessions: make(map[string]*Session),
-		byState:  make(map[string]string),
+		sessions:   make(map[string]*Session),
+		byState:    make(map[string]string),
+		byAuthHash: make(map[string]string),
 	}
 }
 
@@ -65,6 +69,9 @@ func (s *Store) Create(sess *Session) string {
 	sess.Status = "new"
 	s.sessions[id] = sess
 	s.byState[sess.State] = id
+	if sess.AuthHash != "" {
+		s.byAuthHash[sess.AuthHash] = id
+	}
 	return id
 }
 
@@ -86,6 +93,17 @@ func (s *Store) FindByState(state string) (*Session, bool) {
 	return v, ok
 }
 
+func (s *Store) FindByAuthHash(hash string) (*Session, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	id, ok := s.byAuthHash[hash]
+	if !ok {
+		return nil, false
+	}
+	v, ok := s.sessions[id]
+	return v, ok
+}
+
 func (s *Store) Update(id string, fn func(*Session)) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -93,7 +111,14 @@ func (s *Store) Update(id string, fn func(*Session)) bool {
 	if !ok {
 		return false
 	}
+	oldHash := v.AuthHash
 	fn(v)
+	if v.AuthHash != oldHash {
+		delete(s.byAuthHash, oldHash)
+		if v.AuthHash != "" {
+			s.byAuthHash[v.AuthHash] = id
+		}
+	}
 	return true
 }
 
@@ -114,51 +139,47 @@ type PendingRequest struct {
 	ErrorChan chan string
 }
 
-type ProviderConfig struct {
-	Name        string
-	AuthURL     string
-	TokenURL    string
-	ClientID    string
-	ClientSecret string
-	RedirectURI string
-	Scopes      string
+type ServiceDef struct {
+	Name     string // "google", "gmail", "gdrive", "microsoft"
+	Provider string // "google" or "microsoft"
+	Scopes   string
 }
 
 var (
 	store           = NewStore()
 	tmpls           = template.Must(template.ParseFS(templateFS, "templates/*.html"))
 	pendingRequests sync.Map
-	providers       map[string]*ProviderConfig
+	services        []ServiceDef
 )
 
-func loadProviders() map[string]*ProviderConfig {
-	m := make(map[string]*ProviderConfig)
+func loadServices() []ServiceDef {
+	var svcs []ServiceDef
 
-	if id := os.Getenv("GOOGLE_CLIENT_ID"); id != "" {
-		m["google"] = &ProviderConfig{
-			Name:         "google",
-			AuthURL:      "https://accounts.google.com/o/oauth2/v2/auth",
-			TokenURL:     "https://oauth2.googleapis.com/token",
-			ClientID:     id,
-			ClientSecret: os.Getenv("GOOGLE_CLIENT_SECRET"),
-			RedirectURI:  envOr("GOOGLE_REDIRECT_URI", "http://localhost:8091/api/google/callback"),
-			Scopes:       envOr("GOOGLE_SCOPES", "openid email profile"),
-		}
+	if os.Getenv("GOOGLE_CLIENT_ID") != "" {
+		svcs = append(svcs,
+			ServiceDef{Name: "google", Provider: "google", Scopes: envOr("GOOGLE_SCOPES", "openid email profile")},
+			ServiceDef{Name: "gmail", Provider: "google", Scopes: "https://www.googleapis.com/auth/gmail.readonly"},
+			ServiceDef{Name: "gdrive", Provider: "google", Scopes: "https://www.googleapis.com/auth/drive.readonly"},
+		)
 	}
 
-	if id := os.Getenv("MICROSOFT_CLIENT_ID"); id != "" {
-		m["microsoft"] = &ProviderConfig{
-			Name:         "microsoft",
-			AuthURL:      "https://login.microsoftonline.com/common/oauth2/v2.0/authorize",
-			TokenURL:     "https://login.microsoftonline.com/common/oauth2/v2.0/token",
-			ClientID:     id,
-			ClientSecret: os.Getenv("MICROSOFT_CLIENT_SECRET"),
-			RedirectURI:  envOr("MICROSOFT_REDIRECT_URI", "http://localhost:8091/api/microsoft/callback"),
-			Scopes:       envOr("MICROSOFT_SCOPES", "openid email profile offline_access"),
-		}
+	if os.Getenv("MICROSOFT_CLIENT_ID") != "" {
+		svcs = append(svcs,
+			ServiceDef{Name: "microsoft", Provider: "microsoft", Scopes: envOr("MICROSOFT_SCOPES", "openid email profile offline_access")},
+		)
 	}
 
-	return m
+	return svcs
+}
+
+var providerAuthURLs = map[string]string{
+	"google":    "https://accounts.google.com/o/oauth2/v2/auth",
+	"microsoft": "https://login.microsoftonline.com/common/oauth2/v2.0/authorize",
+}
+
+var providerTokenURLs = map[string]string{
+	"google":    "https://oauth2.googleapis.com/token",
+	"microsoft": "https://login.microsoftonline.com/common/oauth2/v2.0/token",
 }
 
 func envOr(key, def string) string {
@@ -169,20 +190,21 @@ func envOr(key, def string) string {
 }
 
 func main() {
-	providers = loadProviders()
+	services = loadServices()
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /", handleIndex)
-	mux.HandleFunc("GET /api/{provider}/token", handleProviderToken)
-	mux.HandleFunc("GET /api/{provider}/callback", handleProviderCallback)
+	mux.HandleFunc("GET /auth/{hash}", handleAuthRedirect)
+	mux.HandleFunc("GET /api/{service}/token", handleServiceToken)
+	mux.HandleFunc("GET /api/{provider}/callback", handleCallback)
 
 	addr := ":8091"
 	log.Printf("OAuth2 Playground v%s on %s", version, addr)
-	for name, p := range providers {
-		log.Printf("  provider %s: client_id=%s redirect=%s", name, shorten(p.ClientID, 12), p.RedirectURI)
+	for _, svc := range services {
+		log.Printf("  service %s (provider=%s scopes=%s)", svc.Name, svc.Provider, shorten(svc.Scopes, 40))
 	}
-	if len(providers) == 0 {
-		log.Printf("  no providers configured — set GOOGLE_CLIENT_ID or MICROSOFT_CLIENT_ID env vars")
+	if len(services) == 0 {
+		log.Printf("  no services configured — set GOOGLE_CLIENT_ID or MICROSOFT_CLIENT_ID")
 	}
 	log.Fatal(http.ListenAndServe(addr, mux))
 }
@@ -205,16 +227,16 @@ func serverURL(r *http.Request) string {
 // ---------- Web UI ----------
 
 func handleIndex(w http.ResponseWriter, r *http.Request) {
-	type PInfo struct {
-		Name string
-		Cmd  string
+	type SInfo struct {
+		Name    string
+		Cmd     string
+		CmdLong string
 	}
-	var list []PInfo
-	for name := range providers {
-		list = append(list, PInfo{
-			Name: name,
-			Cmd:  fmt.Sprintf("curl -i %s/api/%s/token > token.txt", serverURL(r), name),
-		})
+	var list []SInfo
+	for _, svc := range services {
+		cmd := fmt.Sprintf("curl -i %s/api/%s/token > token.txt", serverURL(r), svc.Name)
+		cmdLong := fmt.Sprintf("curl -i '%s/api/%s/token?scopes=extra1,extra2' > token.txt", serverURL(r), svc.Name)
+		list = append(list, SInfo{Name: svc.Name, Cmd: cmd, CmdLong: cmdLong})
 	}
 	sort.Slice(list, func(i, j int) bool { return list[i].Name < list[j].Name })
 
@@ -222,32 +244,23 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
 	tmpls.ExecuteTemplate(w, "index.html", map[string]interface{}{
 		"ServerURL": serverURL(r),
 		"Version":   version,
-		"Providers": list,
+		"Services":  list,
 	})
 }
 
-// ---------- Token (long-poll) ----------
+// ---------- Auth redirect (masked URL) ----------
 
-func handleProviderToken(w http.ResponseWriter, r *http.Request) {
-	provider := r.PathValue("provider")
-	cfg, ok := providers[provider]
+func handleAuthRedirect(w http.ResponseWriter, r *http.Request) {
+	hash := r.PathValue("hash")
+	sess, ok := store.FindByAuthHash(hash)
 	if !ok {
-		writeJSON(w, 404, map[string]string{"error": fmt.Sprintf("provider %q not configured", provider)})
+		http.NotFound(w, r)
 		return
 	}
 
-	redirectURI := cfg.RedirectURI
+	store.Update(sess.ID, func(s *Session) { s.Status = "started" })
 
-	sess := &Session{
-		Name:         provider,
-		AuthURL:      cfg.AuthURL,
-		TokenURL:     cfg.TokenURL,
-		ClientID:     cfg.ClientID,
-		ClientSecret: cfg.ClientSecret,
-		Scopes:       cfg.Scopes,
-		RedirectURI:  redirectURI,
-	}
-	store.Create(sess)
+	redirectURI := sess.RedirectURI
 
 	v := url.Values{}
 	v.Set("response_type", "code")
@@ -266,7 +279,62 @@ func handleProviderToken(w http.ResponseWriter, r *http.Request) {
 		authURL += "?" + v.Encode()
 	}
 
-	store.Update(sess.ID, func(s *Session) { s.Status = "started" })
+	http.Redirect(w, r, authURL, http.StatusFound)
+}
+
+// ---------- Service token (long-poll) ----------
+
+func handleServiceToken(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("service")
+
+	var svc *ServiceDef
+	for i := range services {
+		if services[i].Name == name {
+			svc = &services[i]
+			break
+		}
+	}
+	if svc == nil {
+		writeJSON(w, 404, map[string]string{"error": fmt.Sprintf("service %q not configured", name)})
+		return
+	}
+
+	var clientID, clientSecret, redirectURI string
+	switch svc.Provider {
+	case "google":
+		clientID = os.Getenv("GOOGLE_CLIENT_ID")
+		clientSecret = os.Getenv("GOOGLE_CLIENT_SECRET")
+		redirectURI = envOr("GOOGLE_REDIRECT_URI", fmt.Sprintf("http://%s/api/google/callback", r.Host))
+	case "microsoft":
+		clientID = os.Getenv("MICROSOFT_CLIENT_ID")
+		clientSecret = os.Getenv("MICROSOFT_CLIENT_SECRET")
+		redirectURI = envOr("MICROSOFT_REDIRECT_URI", fmt.Sprintf("http://%s/api/microsoft/callback", r.Host))
+	}
+
+	extraScopes := r.URL.Query().Get("scopes")
+	scopes := svc.Scopes
+	if extraScopes != "" {
+		scopes = svc.Scopes + " " + strings.ReplaceAll(extraScopes, ",", " ")
+	}
+
+	authURLStr := providerAuthURLs[svc.Provider]
+	tokenURLStr := providerTokenURLs[svc.Provider]
+
+	sess := &Session{
+		Name:         svc.Name,
+		Provider:     svc.Provider,
+		AuthURL:      authURLStr,
+		TokenURL:     tokenURLStr,
+		ClientID:     clientID,
+		ClientSecret: clientSecret,
+		Scopes:       scopes,
+		RedirectURI:  redirectURI,
+		AuthHash:     genID(),
+	}
+	store.Create(sess)
+
+	maskedURL := fmt.Sprintf("http://%s/auth/%s", r.Host, sess.AuthHash)
+	store.Update(sess.ID, func(s *Session) { s.Status = "masked" })
 
 	pr := &PendingRequest{
 		TokenChan: make(chan map[string]interface{}, 1),
@@ -275,7 +343,7 @@ func handleProviderToken(w http.ResponseWriter, r *http.Request) {
 	pendingRequests.Store(sess.ID, pr)
 	defer pendingRequests.Delete(sess.ID)
 
-	w.Header().Set("open-on-browser", authURL)
+	w.Header().Set("open-on-browser", maskedURL)
 	w.Header().Set("X-Session-Id", sess.ID)
 	w.Header().Set("Content-Type", "application/json")
 
@@ -295,9 +363,9 @@ func handleProviderToken(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// ---------- Callback (riceve il redirect dal provider) ----------
+// ---------- Callback ----------
 
-func handleProviderCallback(w http.ResponseWriter, r *http.Request) {
+func handleCallback(w http.ResponseWriter, r *http.Request) {
 	provider := r.PathValue("provider")
 
 	code := r.URL.Query().Get("code")
@@ -321,8 +389,8 @@ func handleProviderCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if sess.Name != provider {
-		renderCallbackHTML(w, "Provider mismatch", fmt.Sprintf("session is for %q, not %q", sess.Name, provider))
+	if sess.Provider != provider {
+		renderCallbackHTML(w, "Provider mismatch", fmt.Sprintf("session provider is %q, not %q", sess.Provider, provider))
 		return
 	}
 
@@ -352,92 +420,13 @@ func renderCallbackHTML(w http.ResponseWriter, title, msg string) {
 <h1>%s</h1><p>%s</p><script>window.close()</script></body></html>`, title, msg)
 }
 
-// ---------- Session API generica ----------
-
-func handleCreateSession(w http.ResponseWriter, r *http.Request) {
-	if err := r.ParseForm(); err != nil {
-		writeJSON(w, 400, map[string]string{"error": err.Error()})
-		return
-	}
-	redir := r.FormValue("redirect_uri")
-	if redir == "" {
-		redir = "http://localhost:8080"
-	}
-	sess := &Session{
-		Name:         r.FormValue("name"),
-		AuthURL:      r.FormValue("auth_url"),
-		TokenURL:     r.FormValue("token_url"),
-		ClientID:     r.FormValue("client_id"),
-		ClientSecret: r.FormValue("client_secret"),
-		Scopes:       r.FormValue("scopes"),
-		RedirectURI:  redir,
-	}
-	if sess.AuthURL == "" || sess.TokenURL == "" || sess.ClientID == "" || sess.ClientSecret == "" {
-		writeJSON(w, 400, map[string]string{"error": "missing required fields"})
-		return
-	}
-	store.Create(sess)
-	writeJSON(w, 201, map[string]interface{}{
-		"id":           sess.ID,
-		"state":        sess.State,
-		"name":         sess.Name,
-		"redirect_uri": sess.RedirectURI,
-		"created_at":   sess.CreatedAt,
-	})
-}
-
-func handleAuthURL(w http.ResponseWriter, r *http.Request) {
-	id := r.PathValue("id")
-	sess, ok := store.Get(id)
-	if !ok {
-		writeJSON(w, 404, map[string]string{"error": "session not found"})
-		return
-	}
-	v := url.Values{}
-	v.Set("response_type", "code")
-	v.Set("client_id", sess.ClientID)
-	v.Set("redirect_uri", sess.RedirectURI)
-	v.Set("state", sess.State)
-	if sess.Scopes != "" {
-		v.Set("scope", strings.ReplaceAll(sess.Scopes, ",", " "))
-	}
-	authURL := sess.AuthURL
-	if strings.Contains(authURL, "?") {
-		authURL += "&" + v.Encode()
-	} else {
-		authURL += "?" + v.Encode()
-	}
-	store.Update(id, func(s *Session) { s.Status = "started" })
-	writeJSON(w, 200, map[string]string{"auth_url": authURL})
-}
-
-func handleExchange(w http.ResponseWriter, r *http.Request) {
-	id := r.PathValue("id")
-	sess, ok := store.Get(id)
-	if !ok {
-		writeJSON(w, 404, map[string]string{"error": "session not found"})
-		return
-	}
-	if err := r.ParseForm(); err != nil {
-		writeJSON(w, 400, map[string]string{"error": err.Error()})
-		return
-	}
-	code := r.FormValue("code")
-	if code == "" {
-		writeJSON(w, 400, map[string]string{"error": "missing code"})
-		return
-	}
-	result := exchangeCode(sess, code)
-	writeJSON(w, result.Status, result.Data)
-}
+// ---------- Helpers ----------
 
 func writeJSON(w http.ResponseWriter, status int, data interface{}) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	json.NewEncoder(w).Encode(data)
 }
-
-// ---------- OAuth2 exchange ----------
 
 type exchangeResult struct {
 	Status int
