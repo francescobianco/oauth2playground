@@ -27,9 +27,6 @@ code{background:#eef1f5;padding:2px 6px;border-radius:4px;font-size:13px}
 select.svc-picker{width:100%;padding:10px 12px;border:1px solid #ddd;border-radius:6px;font-size:14px;background:#fff;margin-bottom:12px;cursor:pointer}
 select.svc-picker:focus{border-color:#4a6cf7;outline:none;box-shadow:0 0 0 3px rgba(74,108,247,.15)}
 
-.alert{font-size:13px;color:#856404;background:#fff3cd;border:1px solid #ffeeba;border-radius:6px;padding:10px 14px;margin:8px 0}
-.alert code{background:#fff3cd}
-
 pre.env{background:#1e1e2e;color:#cdd6f4;padding:14px 18px;border-radius:8px;font-size:13px;overflow-x:auto;margin:10px 0}
 
 table.param{width:100%;border-collapse:collapse;font-size:14px;margin:10px 0}
@@ -71,9 +68,6 @@ table.param code{font-size:12px}
 </div>
 </div>
 
-<div id="https-alert" class="alert" style="display:none">
-&#9888; This server is not <code>localhost</code> — use <strong>HTTPS</strong> in the command above if your server supports it.
-</div>
 </div>
 
 <div class="card">
@@ -81,7 +75,7 @@ table.param code{font-size:12px}
 <p style="font-size:14px;color:#555;margin-bottom:10px">Replace <code>{service}</code> with the service name:</p>
 <div class="cmd-wrap">
 <div class="cmd-line">curl -sv {{.ServerURL}}/api/{service}/token &gt; token.json</div>
-<button class="cmd-btn" data-cmd="curl -v {{.ServerURL}}/api/{service}/token > token.json">&#128203; Copy</button>
+<button class="cmd-btn" data-cmd="curl -sv {{.ServerURL}}/api/{service}/token > token.json">&#128203; Copy</button>
 </div>
 
 <h2 style="margin-top:18px">Query parameters</h2>
@@ -132,8 +126,6 @@ var services = [
 var picker = document.getElementById('svc-picker');
 var cmdLine = document.getElementById('cmd-line');
 var cmdBtn = document.getElementById('cmd-btn');
-var httpsAlert = document.getElementById('https-alert');
-
 function updateCmd() {
 var svc = services.find(function(s){return s.name===picker.value;});
 if (!svc) return;
@@ -144,13 +136,6 @@ cmdBtn.setAttribute('data-cmd', svc.cmd);
 if (picker) {
 picker.addEventListener('change', updateCmd);
 updateCmd();
-}
-
-// HTTPS warning
-var host = window.location.hostname;
-if (httpsAlert && host !== 'localhost' && host !== '127.0.0.1') {
-httpsAlert.style.display = 'block';
-}
 
 // Copy buttons
 var btns=document.querySelectorAll('.cmd-btn');
