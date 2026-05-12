@@ -3,7 +3,7 @@ networks:
     external: true
 
 services:
-  agentgrid:
+  oauth2playground:
     networks:
       - proxy
       - default
