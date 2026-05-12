@@ -107,19 +107,6 @@ func genState() string {
 	return hex.EncodeToString(b)
 }
 
-type PageData struct {
-	Session   *Session
-	ServerURL string
-	CurlCmd   string
-}
-
-type ExchangeResult struct {
-	Success    bool                   `json:"success"`
-	Data       map[string]interface{} `json:"data,omitempty"`
-	Error      string                 `json:"error,omitempty"`
-	RawStatus  int                    `json:"-"`
-}
-
 var (
 	store = NewStore()
 	tmpls = template.Must(template.ParseFS(templateFS, "templates/*.html"))
@@ -129,13 +116,10 @@ func main() {
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("GET /", handleIndex)
-	mux.HandleFunc("GET /session/{id}", handleSessionPage)
-	mux.HandleFunc("POST /api/sessions", handleCreateSession)
-	mux.HandleFunc("GET /api/sessions/{id}", handleGetSession)
-	mux.HandleFunc("POST /api/sessions/{id}/auth-url", handleAuthURL)
-	mux.HandleFunc("POST /api/sessions/{id}/exchange", handleExchange)
-	mux.HandleFunc("POST /api/{provider}/token", handleNamedExchange)
-	mux.HandleFunc("GET /api/sessions/{id}/script", handleScript)
+	mux.HandleFunc("GET /start", handleStartScript)
+	mux.HandleFunc("POST /api/session", handleCreateSession)
+	mux.HandleFunc("POST /api/session/{id}/auth-url", handleAuthURL)
+	mux.HandleFunc("POST /api/session/{id}/exchange", handleExchange)
 
 	addr := ":8091"
 	log.Printf("OAuth2 Playground v%s on %s", version, addr)
@@ -154,28 +138,25 @@ func serverURL(r *http.Request) string {
 
 func handleIndex(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	tmpls.ExecuteTemplate(w, "index.html", nil)
+	tmpls.ExecuteTemplate(w, "index.html", map[string]string{
+		"ServerURL": serverURL(r),
+		"Version":   version,
+	})
 }
 
-func handleSessionPage(w http.ResponseWriter, r *http.Request) {
-	id := r.PathValue("id")
-	sess, ok := store.Get(id)
-	if !ok {
-		http.NotFound(w, r)
-		return
-	}
+// ---------- Start script ----------
+
+func handleStartScript(w http.ResponseWriter, r *http.Request) {
 	su := serverURL(r)
-	curlCmd := fmt.Sprintf("curl -s %s/api/sessions/%s/script | bash", su, id)
-	data := PageData{Session: sess, ServerURL: su, CurlCmd: curlCmd}
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	tmpls.ExecuteTemplate(w, "session.html", data)
+	w.Header().Set("Content-Type", "text/x-shellscript; charset=utf-8")
+	w.Write([]byte(generateStartScript(su)))
 }
 
 // ---------- API ----------
 
 func handleCreateSession(w http.ResponseWriter, r *http.Request) {
 	if err := r.ParseForm(); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		writeJSON(w, 400, map[string]string{"error": err.Error()})
 		return
 	}
 	redir := r.FormValue("redirect_uri")
@@ -192,29 +173,24 @@ func handleCreateSession(w http.ResponseWriter, r *http.Request) {
 		RedirectURI:  redir,
 	}
 	if sess.AuthURL == "" || sess.TokenURL == "" || sess.ClientID == "" || sess.ClientSecret == "" {
-		http.Error(w, "Missing required fields", http.StatusBadRequest)
+		writeJSON(w, 400, map[string]string{"error": "Missing required fields"})
 		return
 	}
 	store.Create(sess)
-	http.Redirect(w, r, "/session/"+sess.ID, http.StatusSeeOther)
-}
-
-func handleGetSession(w http.ResponseWriter, r *http.Request) {
-	id := r.PathValue("id")
-	sess, ok := store.Get(id)
-	if !ok {
-		http.NotFound(w, r)
-		return
-	}
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(sess)
+	writeJSON(w, 201, map[string]interface{}{
+		"id":           sess.ID,
+		"state":        sess.State,
+		"name":         sess.Name,
+		"redirect_uri": sess.RedirectURI,
+		"created_at":   sess.CreatedAt,
+	})
 }
 
 func handleAuthURL(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	sess, ok := store.Get(id)
 	if !ok {
-		http.NotFound(w, r)
+		writeJSON(w, 404, map[string]string{"error": "session not found"})
 		return
 	}
 	v := url.Values{}
@@ -232,74 +208,43 @@ func handleAuthURL(w http.ResponseWriter, r *http.Request) {
 		authURL += "?" + v.Encode()
 	}
 	store.Update(id, func(s *Session) { s.Status = "started" })
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]string{"auth_url": authURL})
+	writeJSON(w, 200, map[string]string{"auth_url": authURL})
 }
 
 func handleExchange(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	sess, ok := store.Get(id)
 	if !ok {
-		http.NotFound(w, r)
+		writeJSON(w, 404, map[string]string{"error": "session not found"})
 		return
 	}
 	if err := r.ParseForm(); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		writeJSON(w, 400, map[string]string{"error": err.Error()})
 		return
 	}
 	code := r.FormValue("code")
 	if code == "" {
-		http.Error(w, "Missing code", http.StatusBadRequest)
+		writeJSON(w, 400, map[string]string{"error": "missing code"})
 		return
 	}
 	result := exchangeCode(sess, code)
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(result.RawStatus)
-	json.NewEncoder(w).Encode(result)
+	writeJSON(w, result.Status, result.Data)
 }
 
-func handleNamedExchange(w http.ResponseWriter, r *http.Request) {
-	provider := r.PathValue("provider")
-	if err := r.ParseForm(); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-	code := r.FormValue("code")
-	state := r.FormValue("state")
-	if code == "" || state == "" {
-		http.Error(w, "Missing code or state", http.StatusBadRequest)
-		return
-	}
-	sess, ok := store.FindByState(state)
-	if !ok {
-		http.Error(w, "Session not found for given state", http.StatusNotFound)
-		return
-	}
-	if sess.Name != provider {
-		http.Error(w, fmt.Sprintf("provider mismatch: expected %q, got %q", sess.Name, provider), http.StatusBadRequest)
-		return
-	}
-	result := exchangeCode(sess, code)
+func writeJSON(w http.ResponseWriter, status int, data interface{}) {
 	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(result.RawStatus)
-	json.NewEncoder(w).Encode(result)
-}
-
-func handleScript(w http.ResponseWriter, r *http.Request) {
-	id := r.PathValue("id")
-	sess, ok := store.Get(id)
-	if !ok {
-		http.NotFound(w, r)
-		return
-	}
-	su := serverURL(r)
-	w.Header().Set("Content-Type", "text/x-shellscript; charset=utf-8")
-	w.Write([]byte(generateScript(sess, su)))
+	w.WriteHeader(status)
+	json.NewEncoder(w).Encode(data)
 }
 
 // ---------- OAuth2 exchange ----------
 
-func exchangeCode(sess *Session, code string) ExchangeResult {
+type exchangeResult struct {
+	Status int
+	Data   map[string]interface{}
+}
+
+func exchangeCode(sess *Session, code string) exchangeResult {
 	v := url.Values{}
 	v.Set("grant_type", "authorization_code")
 	v.Set("code", code)
@@ -310,7 +255,7 @@ func exchangeCode(sess *Session, code string) ExchangeResult {
 	resp, err := http.PostForm(sess.TokenURL, v)
 	if err != nil {
 		store.Update(sess.ID, func(s *Session) { s.Status = "error"; s.Error = err.Error() })
-		return ExchangeResult{Success: false, Error: err.Error(), RawStatus: 502}
+		return exchangeResult{502, map[string]interface{}{"error": err.Error()}}
 	}
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
@@ -318,146 +263,190 @@ func exchangeCode(sess *Session, code string) ExchangeResult {
 	var data map[string]interface{}
 	if err := json.Unmarshal(body, &data); err != nil {
 		store.Update(sess.ID, func(s *Session) { s.Status = "error"; s.Error = string(body) })
-		return ExchangeResult{Success: false, Error: "invalid response: " + string(body), Data: map[string]interface{}{"raw": string(body)}, RawStatus: resp.StatusCode}
+		return exchangeResult{502, map[string]interface{}{"error": "invalid response", "raw": string(body)}}
 	}
 
-	if accessToken, ok := data["access_token"].(string); ok {
+	if token, ok := data["access_token"].(string); ok {
 		tokenType, _ := data["token_type"].(string)
 		expiresIn, _ := data["expires_in"].(float64)
 		store.Update(sess.ID, func(s *Session) {
 			s.Status = "completed"
-			s.AccessToken = accessToken
+			s.AccessToken = token
 			s.TokenType = tokenType
 			s.ExpiresIn = int(expiresIn)
 			if rt, ok := data["refresh_token"].(string); ok {
 				s.RefreshToken = rt
 			}
 		})
-		return ExchangeResult{Success: true, Data: data, RawStatus: 200}
+		return exchangeResult{200, data}
 	}
 
-	if errDesc, ok := data["error_description"].(string); ok {
-		store.Update(sess.ID, func(s *Session) { s.Status = "error"; s.Error = errDesc })
-		return ExchangeResult{Success: false, Error: errDesc, Data: data, RawStatus: resp.StatusCode}
+	if desc, ok := data["error_description"].(string); ok {
+		store.Update(sess.ID, func(s *Session) { s.Status = "error"; s.Error = desc })
+		return exchangeResult{400, data}
 	}
 	if errCode, ok := data["error"].(string); ok {
 		store.Update(sess.ID, func(s *Session) { s.Status = "error"; s.Error = errCode })
-		return ExchangeResult{Success: false, Error: errCode, Data: data, RawStatus: resp.StatusCode}
+		return exchangeResult{400, data}
 	}
 
-	return ExchangeResult{Success: false, Error: "unexpected response", Data: data, RawStatus: resp.StatusCode}
+	return exchangeResult{200, data}
 }
 
-// ---------- Script generation ----------
+// ---------- Start script generation ----------
 
-func generateScript(sess *Session, serverURL string) string {
+func generateStartScript(serverURL string) string {
 	s := `#!/bin/bash
-# OAuth2 Playground v` + version + ` - Local callback script
+# OAuth2 Playground v{{VERSION}} - Interactive flow
+# Usage: curl -s {{SERVER}}/start | bash
 set -e
 
-SESSION_ID="{{SESSION_ID}}"
-REDIRECT_URI="{{REDIRECT_URI}}"
-SERVER="{{SERVER_URL}}"
-PROVIDER="{{PROVIDER}}"
+SERVER="{{SERVER}}"
 
-echo "=== OAuth2 Playground ==="
-echo "Session: $SESSION_ID  Provider: $PROVIDER"
+echo ""
+echo "  >> OAuth2 Playground v{{VERSION}} <<"
+echo "  Interactive access token retriever"
 echo ""
 
+# ---------- config ----------
+read -p "  Provider name        [default]: " PROVIDER
+PROVIDER=${PROVIDER:-default}
+
+read -p "  Authorization URL    [https://accounts.google.com/o/oauth2/v2/auth]: " AUTH_URL
+AUTH_URL=${AUTH_URL:-https://accounts.google.com/o/oauth2/v2/auth}
+
+read -p "  Token URL            [https://oauth2.googleapis.com/token]: " TOKEN_URL
+TOKEN_URL=${TOKEN_URL:-https://oauth2.googleapis.com/token}
+
+read -p "  Client ID            : " CLIENT_ID
+while [ -z "$CLIENT_ID" ]; do
+  read -p "  Client ID (required) : " CLIENT_ID
+done
+
+read -s -p "  Client Secret        : " CLIENT_SECRET
+echo ""
+while [ -z "$CLIENT_SECRET" ]; do
+  read -s -p "  Client Secret (req)  : " CLIENT_SECRET
+  echo ""
+done
+
+read -p "  Scopes               [openid email profile]: " SCOPES
+SCOPES=${SCOPES:-openid email profile}
+
+read -p "  Redirect URI         [http://localhost:8080]: " REDIRECT_URI
+REDIRECT_URI=${REDIRECT_URI:-http://localhost:8080}
+
+# ---------- create session ----------
+echo ""
+echo "  Creating session ..."
+
+RESP=$(curl -s -X POST "$SERVER/api/session" \
+  -d "name=$PROVIDER" \
+  -d "auth_url=$AUTH_URL" \
+  -d "token_url=$TOKEN_URL" \
+  -d "client_id=$CLIENT_ID" \
+  -d "client_secret=$CLIENT_SECRET" \
+  -d "scopes=$SCOPES" \
+  -d "redirect_uri=$REDIRECT_URI")
+
+SESSION_ID=$(echo "$RESP" | python3 -c "import sys,json; print(json.load(sys.stdin).get('id',''))" 2>/dev/null || echo "$RESP" | grep -o '"id":"[^"]*"' | cut -d'"' -f4)
+
+if [ -z "$SESSION_ID" ]; then
+  echo "  ERROR: $RESP"
+  exit 1
+fi
+
+echo "  Session: $SESSION_ID"
+
+# ---------- get auth url ----------
+echo "  Preparing authorization request ..."
+
+AUTH_RESP=$(curl -s -X POST "$SERVER/api/session/$SESSION_ID/auth-url")
+AUTH_URL=$(echo "$AUTH_RESP" | python3 -c "import sys,json; print(json.load(sys.stdin).get('auth_url',''))" 2>/dev/null || echo "$AUTH_RESP" | grep -o '"auth_url":"[^"]*"' | cut -d'"' -f4)
+
+if [ -z "$AUTH_URL" ]; then
+  echo "  ERROR: $AUTH_RESP"
+  exit 1
+fi
+
+echo "  Opening browser ..."
+
+if command -v xdg-open &>/dev/null; then
+  xdg-open "$AUTH_URL" 2>/dev/null || true
+elif command -v open &>/dev/null; then
+  open "$AUTH_URL" 2>/dev/null || true
+else
+  echo ""
+  echo "  Open this URL in your browser:"
+  echo "  $AUTH_URL"
+fi
+
+# ---------- listen ----------
 PORT=$(echo "$REDIRECT_URI" | sed 's/.*:\([0-9]*\).*/\1/')
 [ -z "$PORT" ] && PORT=8080
-echo "Callback port: $PORT"
 
-# ------- get auth url -------
-echo "Getting authorization URL ..."
-AUTH_URL=$(curl -s -X POST "$SERVER/api/sessions/$SESSION_ID/auth-url" \
-    | grep -o '"auth_url":"[^"]*"' | cut -d'"' -f4)
-if [ -z "$AUTH_URL" ]; then
-    echo "ERROR: failed to get authorization URL"
-    exit 1
-fi
+echo "  Listening on port $PORT ..."
 
-# ------- open browser -------
-echo "Opening browser ..."
-if command -v xdg-open &>/dev/null; then
-    xdg-open "$AUTH_URL" 2>/dev/null || true
-elif command -v open &>/dev/null; then
-    open "$AUTH_URL" 2>/dev/null || true
-else
-    echo "Open this URL in your browser:"
-    echo "$AUTH_URL"
-fi
-echo ""
-
-# ------- listen for callback -------
-echo "Waiting for OAuth2 redirect on port $PORT ..."
-
-RESP=$(printf "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n<!DOCTYPE html><html><body><h1>OK</h1><script>window.close()</script></body></html>")
+RESP_HTTP=$(printf "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n<!DOCTYPE html><html><body><h1>OK</h1><script>window.close()</script></body></html>")
 
 REQUEST=""
 if command -v nc &>/dev/null; then
-    REQUEST=$(printf "%s" "$RESP" | nc -l "$PORT" 2>/dev/null || true)
-    if [ -z "$REQUEST" ]; then
-        REQUEST=$(printf "%s" "$RESP" | nc -l -p "$PORT" 2>/dev/null || true)
-    fi
+  REQUEST=$(printf "%s" "$RESP_HTTP" | nc -l "$PORT" 2>/dev/null || true)
+  if [ -z "$REQUEST" ]; then
+    REQUEST=$(printf "%s" "$RESP_HTTP" | nc -l -p "$PORT" 2>/dev/null || true)
+  fi
 fi
 
 if [ -z "$REQUEST" ]; then
-    echo "ERROR: no callback received on port $PORT"
-    echo "Install netcat (nc) or check the port"
-    exit 1
+  echo "  ERROR: no callback received on port $PORT"
+  echo "  Make sure netcat (nc) is installed"
+  exit 1
 fi
 
-echo "Callback received!"
+echo "  Callback received!"
 
-# ------- extract code & state -------
+# ---------- extract code ----------
 FIRST=$(echo "$REQUEST" | head -1)
 
 ERR=$(echo "$FIRST" | sed 's/.*[?&]error=\([^& ]*\).*/\1/')
 if [ "$ERR" != "$FIRST" ]; then
-    DESC=$(echo "$FIRST" | sed 's/.*[?&]error_description=\([^& ]*\).*/\1/')
-    echo "ERROR from provider: $ERR"
-    [ -n "$DESC" ] && echo "Description: $(echo "$DESC" | sed 's/+/ /g')"
-    exit 1
+  DESC=$(echo "$FIRST" | sed 's/.*[?&]error_description=\([^& ]*\).*/\1/')
+  echo "  ERROR from provider: $ERR"
+  [ -n "$DESC" ] && echo "  Description: $(echo "$DESC" | sed 's/+/ /g')"
+  exit 1
 fi
 
 CODE=$(echo "$FIRST" | sed 's/.*[?&]code=\([^& ]*\).*/\1/')
-STATE=$(echo "$FIRST" | sed 's/.*[?&]state=\([^& ]*\).*/\1/')
 
 if [ -z "$CODE" ] || [ "$CODE" = "$FIRST" ]; then
-    echo "ERROR: no authorization code in callback"
-    echo "Raw: $FIRST"
-    exit 1
+  echo "  ERROR: could not find authorization code in callback"
+  echo "  Raw: $FIRST"
+  exit 1
 fi
 
-echo "Code: ${CODE:0:20}..."
-[ -n "$STATE" ] && [ "$STATE" != "$FIRST" ] && echo "State: ${STATE:0:20}..."
+echo "  Authorization code extracted"
+echo ""
 
-# ------- exchange code -------
-echo "Exchanging code for token ..."
+# ---------- exchange ----------
+echo "  Exchanging code for access token ..."
 
-JSON=$(curl -s -X POST "$SERVER/api/$PROVIDER/token" \
-    -d "code=$CODE&state=$STATE" 2>/dev/null || echo "")
-
-if [ -z "$JSON" ]; then
-    JSON=$(curl -s -X POST "$SERVER/api/sessions/$SESSION_ID/exchange" \
-        -d "code=$CODE")
-fi
+RESULT=$(curl -s -X POST "$SERVER/api/session/$SESSION_ID/exchange" -d "code=$CODE")
+HAS_TOKEN=$(echo "$RESULT" | python3 -c "import sys,json; d=json.load(sys.stdin); print('yes' if d.get('access_token') else 'no')" 2>/dev/null || echo "unknown")
 
 echo ""
-echo "=== Response ==="
+echo "  ========================"
+echo "    ACCESS TOKEN"
+echo "  ========================"
 if command -v python3 &>/dev/null; then
-    echo "$JSON" | python3 -m json.tool 2>/dev/null || echo "$JSON"
+  echo "$RESULT" | python3 -m json.tool 2>/dev/null || echo "$RESULT"
 else
-    echo "$JSON"
+  echo "$RESULT"
 fi
+echo "  ========================"
 echo ""
-echo "Done!"
 `
 
-	s = strings.ReplaceAll(s, "{{SESSION_ID}}", sess.ID)
-	s = strings.ReplaceAll(s, "{{REDIRECT_URI}}", sess.RedirectURI)
-	s = strings.ReplaceAll(s, "{{SERVER_URL}}", serverURL)
-	s = strings.ReplaceAll(s, "{{PROVIDER}}", sess.Name)
+	s = strings.ReplaceAll(s, "{{VERSION}}", version)
+	s = strings.ReplaceAll(s, "{{SERVER}}", serverURL)
 	return s
 }
