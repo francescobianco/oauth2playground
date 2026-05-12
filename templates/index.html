@@ -40,16 +40,35 @@ ol li{margin-bottom:4px}
 </div>
 
 <div class="card">
-<h2>One-liner</h2>
+<h2>One-liner (interactive)</h2>
 <p>Copy and run this in your terminal:</p>
 <div class="cmd" id="cmdline" data-cmd="curl -s {{.ServerURL}}/start | bash">curl -s {{.ServerURL}}/start | bash<span class="hint">click to copy</span></div>
 <p>Requires <code>curl</code>, <code>nc</code> (netcat), and <code>python3</code> on your machine.</p>
 </div>
 
-<div class="card">
-<h2>What happens next?</h2>
-<p>The script will ask for your OAuth2 provider details, open your browser for authentication, wait for the callback on your local machine, exchange the authorization code, and print the access token &mdash; all in one session.</p>
+{{if .GoogleReady}}
+<div class="card" style="border-left:4px solid #34a853">
+<h2>&#9654; Google quick start</h2>
+<p style="font-size:13px;color:#666;margin-bottom:8px">Google OAuth2 is pre-configured. Use two terminals:</p>
+<p><strong>Terminal 1</strong> &mdash; start the request (connection stays open):</p>
+<div class="cmd" id="cmdgoogle" data-cmd="curl -v {{.ServerURL}}/api/google/token">curl -v {{.ServerURL}}/api/google/token<span class="hint">click to copy</span></div>
+
+<p><strong>Terminal 2</strong> &mdash; listen for the callback and send the code back:</p>
+<div class="cmd" id="cmdnc" data-cmd="RESP=$(printf 'HTTP/1.1 200 OK\r\n\r\nOK' | nc -l 8080) \&\& CODE=$(echo &quot;$RESP&quot; | head -1 | sed 's/.*code=\([^& ]*\).*/\1/') \&\& STATE=$(echo &quot;$RESP&quot; | head -1 | sed 's/.*state=\([^& ]*\).*/\1/') \&\& curl -X POST {{.ServerURL}}/api/google/callback -d &quot;code=$CODE&amp;state=$STATE&quot;">RESP=$(printf 'HTTP/1.1 200 OK\r\n\r\nOK' | nc -l 8080) && CODE=$(echo "$RESP" | head -1 | sed 's/.*code=\([^& ]*\).*/\1/') && STATE=$(echo "$RESP" | head -1 | sed 's/.*state=\([^& ]*\).*/\1/') && curl -X POST {{.ServerURL}}/api/google/callback -d "code=$CODE&amp;state=$STATE"<span class="hint">click to copy</span></div>
+
+<p style="font-size:13px;color:#888">After authorizing in the browser, the redirect goes to netcat. The code is then sent back and Terminal 1 receives the token.</p>
 </div>
+{{else}}
+<div class="card" style="border-left:4px solid #ea4335">
+<h2>Google one-step</h2>
+<p style="font-size:13px;color:#888">Set environment variables to enable the Google quick-start endpoint:</p>
+<pre>export OAUTH2PLAYGROUND_GOOGLE_CLIENT_ID=your_client_id
+export OAUTH2PLAYGROUND_GOOGLE_CLIENT_SECRET=your_client_secret
+export OAUTH2PLAYGROUND_GOOGLE_REDIRECT_URI=http://localhost:8080
+export OAUTH2PLAYGROUND_GOOGLE_SCOPES="openid email profile"</pre>
+<p style="font-size:13px;color:#888">Then restart the server.</p>
+</div>
+{{end}}
 </div>
 
 <script>

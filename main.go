@@ -11,6 +11,7 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -107,22 +108,47 @@ func genState() string {
 	return hex.EncodeToString(b)
 }
 
+type PendingRequest struct {
+	TokenChan chan map[string]interface{}
+	ErrorChan chan string
+}
+
 var (
-	store = NewStore()
-	tmpls = template.Must(template.ParseFS(templateFS, "templates/*.html"))
+	store           = NewStore()
+	tmpls           = template.Must(template.ParseFS(templateFS, "templates/*.html"))
+	pendingRequests sync.Map
+
+	googleClientID     = os.Getenv("OAUTH2PLAYGROUND_GOOGLE_CLIENT_ID")
+	googleClientSecret = os.Getenv("OAUTH2PLAYGROUND_GOOGLE_CLIENT_SECRET")
+	googleRedirectURI  = envOrDefault("OAUTH2PLAYGROUND_GOOGLE_REDIRECT_URI", "http://localhost:8080")
+	googleScopes       = envOrDefault("OAUTH2PLAYGROUND_GOOGLE_SCOPES", "openid email profile")
 )
+
+func envOrDefault(key, def string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return def
+}
 
 func main() {
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("GET /", handleIndex)
 	mux.HandleFunc("GET /start", handleStartScript)
+
+	mux.HandleFunc("GET /api/google/token", handleGoogleToken)
+	mux.HandleFunc("POST /api/google/callback", handleGoogleCallback)
+
 	mux.HandleFunc("POST /api/session", handleCreateSession)
 	mux.HandleFunc("POST /api/session/{id}/auth-url", handleAuthURL)
 	mux.HandleFunc("POST /api/session/{id}/exchange", handleExchange)
 
 	addr := ":8091"
 	log.Printf("OAuth2 Playground v%s on %s", version, addr)
+	if googleClientID != "" {
+		log.Printf("Google provider configured: client_id=%s redirect_uri=%s", googleClientID[:8]+"...", googleRedirectURI)
+	}
 	log.Fatal(http.ListenAndServe(addr, mux))
 }
 
@@ -137,10 +163,13 @@ func serverURL(r *http.Request) string {
 // ---------- Web UI ----------
 
 func handleIndex(w http.ResponseWriter, r *http.Request) {
+	googleReady := googleClientID != "" && googleClientSecret != ""
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	tmpls.ExecuteTemplate(w, "index.html", map[string]string{
-		"ServerURL": serverURL(r),
-		"Version":   version,
+	tmpls.ExecuteTemplate(w, "index.html", map[string]interface{}{
+		"ServerURL":      serverURL(r),
+		"Version":        version,
+		"GoogleReady":    googleReady,
+		"GoogleRedirect": googleRedirectURI,
 	})
 }
 
@@ -152,7 +181,125 @@ func handleStartScript(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte(generateStartScript(su)))
 }
 
-// ---------- API ----------
+// ---------- Google token (long-poll) ----------
+
+func handleGoogleToken(w http.ResponseWriter, r *http.Request) {
+	if googleClientID == "" || googleClientSecret == "" {
+		writeJSON(w, 400, map[string]string{
+			"error":   "google provider not configured",
+			"message": "Set OAUTH2PLAYGROUND_GOOGLE_CLIENT_ID and OAUTH2PLAYGROUND_GOOGLE_CLIENT_SECRET",
+		})
+		return
+	}
+
+	sess := &Session{
+		Name:         "google",
+		AuthURL:      "https://accounts.google.com/o/oauth2/v2/auth",
+		TokenURL:     "https://oauth2.googleapis.com/token",
+		ClientID:     googleClientID,
+		ClientSecret: googleClientSecret,
+		Scopes:       googleScopes,
+		RedirectURI:  googleRedirectURI,
+	}
+	store.Create(sess)
+
+	v := url.Values{}
+	v.Set("response_type", "code")
+	v.Set("client_id", sess.ClientID)
+	v.Set("redirect_uri", sess.RedirectURI)
+	v.Set("state", sess.State)
+	v.Set("access_type", "offline")
+	v.Set("prompt", "consent")
+	if sess.Scopes != "" {
+		v.Set("scope", strings.ReplaceAll(sess.Scopes, ",", " "))
+	}
+	authURL := sess.AuthURL
+	if strings.Contains(authURL, "?") {
+		authURL += "&" + v.Encode()
+	} else {
+		authURL += "?" + v.Encode()
+	}
+
+	store.Update(sess.ID, func(s *Session) { s.Status = "started" })
+
+	pr := &PendingRequest{
+		TokenChan: make(chan map[string]interface{}, 1),
+		ErrorChan: make(chan string, 1),
+	}
+	pendingRequests.Store(sess.ID, pr)
+	defer pendingRequests.Delete(sess.ID)
+
+	w.Header().Set("open-on-browser", authURL)
+	w.Header().Set("X-Session-Id", sess.ID)
+	w.Header().Set("Content-Type", "application/json")
+
+	flusher, canFlush := w.(http.Flusher)
+	if canFlush {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte{})
+		flusher.Flush()
+	}
+
+	select {
+	case token := <-pr.TokenChan:
+		json.NewEncoder(w).Encode(token)
+	case err := <-pr.ErrorChan:
+		json.NewEncoder(w).Encode(map[string]string{"error": err})
+	case <-time.After(5 * time.Minute):
+		json.NewEncoder(w).Encode(map[string]string{"error": "timeout", "message": "no callback received within 5 minutes"})
+	case <-r.Context().Done():
+		log.Printf("google token request cancelled for session %s", sess.ID)
+	}
+}
+
+// ---------- Google callback ----------
+
+func handleGoogleCallback(w http.ResponseWriter, r *http.Request) {
+	if err := r.ParseForm(); err != nil {
+		writeJSON(w, 400, map[string]string{"error": err.Error()})
+		return
+	}
+
+	code := r.FormValue("code")
+	state := r.FormValue("state")
+
+	if code == "" || state == "" {
+		writeJSON(w, 400, map[string]string{"error": "missing code or state"})
+		return
+	}
+
+	sess, ok := store.FindByState(state)
+	if !ok {
+		writeJSON(w, 404, map[string]string{"error": "session not found for given state"})
+		return
+	}
+
+	if sess.Name != "google" {
+		writeJSON(w, 400, map[string]string{"error": fmt.Sprintf("session provider is %q, not google", sess.Name)})
+		return
+	}
+
+	result := exchangeCode(sess, code)
+
+	if v, ok := pendingRequests.Load(sess.ID); ok {
+		pr := v.(*PendingRequest)
+		if result.Status == 200 {
+			pr.TokenChan <- result.Data
+		} else {
+			errMsg := "exchange failed"
+			if e, ok := result.Data["error_description"]; ok {
+				errMsg = e.(string)
+			} else if e, ok := result.Data["error"]; ok {
+				errMsg = e.(string)
+			}
+			pr.ErrorChan <- errMsg
+		}
+	}
+
+	writeJSON(w, 200, map[string]string{"status": "ok", "message": "token sent to pending request"})
+}
+
+// ---------- Session API ----------
 
 func handleCreateSession(w http.ResponseWriter, r *http.Request) {
 	if err := r.ParseForm(); err != nil {
@@ -173,7 +320,7 @@ func handleCreateSession(w http.ResponseWriter, r *http.Request) {
 		RedirectURI:  redir,
 	}
 	if sess.AuthURL == "" || sess.TokenURL == "" || sess.ClientID == "" || sess.ClientSecret == "" {
-		writeJSON(w, 400, map[string]string{"error": "Missing required fields"})
+		writeJSON(w, 400, map[string]string{"error": "missing required fields"})
 		return
 	}
 	store.Create(sess)
@@ -285,8 +432,8 @@ func exchangeCode(sess *Session, code string) exchangeResult {
 		store.Update(sess.ID, func(s *Session) { s.Status = "error"; s.Error = desc })
 		return exchangeResult{400, data}
 	}
-	if errCode, ok := data["error"].(string); ok {
-		store.Update(sess.ID, func(s *Session) { s.Status = "error"; s.Error = errCode })
+	if ec, ok := data["error"].(string); ok {
+		store.Update(sess.ID, func(s *Session) { s.Status = "error"; s.Error = ec })
 		return exchangeResult{400, data}
 	}
 
@@ -296,6 +443,16 @@ func exchangeCode(sess *Session, code string) exchangeResult {
 // ---------- Start script generation ----------
 
 func generateStartScript(serverURL string) string {
+	googleHint := ""
+	if googleClientID != "" && googleClientSecret != "" {
+		googleHint = fmt.Sprintf(`echo ""
+echo "  Quick start with Google:"
+echo "    curl -v %s/api/google/token"
+echo "    (then in another terminal after netcat captures the code:)"
+echo "    curl -X POST %s/api/google/callback -d \"code=CODE_FROM_NETCAT&state=STATE_FROM_NETCAT\""
+echo ""`, serverURL, serverURL)
+	}
+
 	s := `#!/bin/bash
 # OAuth2 Playground v{{VERSION}} - Interactive flow
 # Usage: curl -s {{SERVER}}/start | bash
@@ -307,6 +464,7 @@ echo ""
 echo "  >> OAuth2 Playground v{{VERSION}} <<"
 echo "  Interactive access token retriever"
 echo ""
+GOOGLE_HINT
 
 # ---------- config ----------
 read -p "  Provider name        [default]: " PROVIDER
@@ -417,6 +575,7 @@ if [ "$ERR" != "$FIRST" ]; then
 fi
 
 CODE=$(echo "$FIRST" | sed 's/.*[?&]code=\([^& ]*\).*/\1/')
+STATE=$(echo "$FIRST" | sed 's/.*[?&]state=\([^& ]*\).*/\1/')
 
 if [ -z "$CODE" ] || [ "$CODE" = "$FIRST" ]; then
   echo "  ERROR: could not find authorization code in callback"
@@ -431,7 +590,6 @@ echo ""
 echo "  Exchanging code for access token ..."
 
 RESULT=$(curl -s -X POST "$SERVER/api/session/$SESSION_ID/exchange" -d "code=$CODE")
-HAS_TOKEN=$(echo "$RESULT" | python3 -c "import sys,json; d=json.load(sys.stdin); print('yes' if d.get('access_token') else 'no')" 2>/dev/null || echo "unknown")
 
 echo ""
 echo "  ========================"
@@ -448,5 +606,6 @@ echo ""
 
 	s = strings.ReplaceAll(s, "{{VERSION}}", version)
 	s = strings.ReplaceAll(s, "{{SERVER}}", serverURL)
+	s = strings.ReplaceAll(s, "GOOGLE_HINT", googleHint)
 	return s
 }
